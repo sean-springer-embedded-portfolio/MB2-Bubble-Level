@@ -1,9 +1,8 @@
 #![no_main]
 #![no_std]
 
-use embedded_hal::digital::InputPin;
 use panic_rtt_target as _;
-use rtt_target::{rprintln, rtt_init_print};
+use rtt_target::rtt_init_print;
 
 use core::sync::atomic::{
     AtomicU8,
@@ -49,15 +48,6 @@ impl TryFrom<u8> for BubbleResolution {
             0 => Ok(BubbleResolution::Coarse),
             1 => Ok(BubbleResolution::Fine),
             _ => Err(()),
-        }
-    }
-}
-
-impl Into<u8> for BubbleResolution {
-    fn into(self) -> u8 {
-        match self {
-            BubbleResolution::Coarse => BubbleResolution::Coarse as u8,
-            BubbleResolution::Fine => BubbleResolution::Fine as u8,
         }
     }
 }
