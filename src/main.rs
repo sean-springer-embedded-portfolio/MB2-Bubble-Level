@@ -5,23 +5,61 @@ use embedded_hal::digital::InputPin;
 use panic_rtt_target as _;
 use rtt_target::{rprintln, rtt_init_print};
 
+use core::sync::atomic::{
+    AtomicU8,
+    Ordering::{Acquire, Release},
+};
+
 use cortex_m_rt::entry;
 use microbit::{
     board::Board,
     display::blocking::Display,
-    hal::{Timer, twim},
+    hal::{
+        Timer, gpiote,
+        pac::{Interrupt, NVIC, TIMER1, interrupt},
+        twim,
+    },
     pac::twim0::frequency::FREQUENCY_A,
 };
 
+use critical_section_lock_mut::LockMut;
 use lsm303agr::{AccelMode, AccelOutputDataRate, Lsm303agr};
 
 const DISPLAY_REFRESH_RATE_MS: u32 = 200;
 const LED_SIZE: usize = 5;
 type LEDState = [[u8; LED_SIZE]; LED_SIZE];
 
+// 100ms at 1MHz count rate.
+const DEBOUNCE_TIME: u32 = 100 * 1_000_000 / 1000;
+
+static RESOLUTION: AtomicU8 = AtomicU8::new(BubbleResolution::Coarse as u8);
+static GPIOTE_PERIPHERAL: LockMut<gpiote::Gpiote> = LockMut::new();
+static DEBOUNCE_TIMER: LockMut<Timer<TIMER1>> = LockMut::new();
+
 enum BubbleResolution {
-    Coarse,
-    Fine,
+    Coarse = 0,
+    Fine = 1,
+}
+
+impl TryFrom<u8> for BubbleResolution {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(BubbleResolution::Coarse),
+            1 => Ok(BubbleResolution::Fine),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Into<u8> for BubbleResolution {
+    fn into(self) -> u8 {
+        match self {
+            BubbleResolution::Coarse => BubbleResolution::Coarse as u8,
+            BubbleResolution::Fine => BubbleResolution::Fine as u8,
+        }
+    }
 }
 
 struct LEDs {
@@ -90,14 +128,65 @@ impl LEDs {
     }
 }
 
+#[interrupt]
+fn GPIOTE() {
+    let mut debounced = false;
+    DEBOUNCE_TIMER.with_lock(|debounce_timer| {
+        if debounce_timer.read() == 0 {
+            debounced = true;
+            debounce_timer.start(DEBOUNCE_TIME);
+        }
+    });
+
+    GPIOTE_PERIPHERAL.with_lock(|gpiote| {
+        if gpiote.channel0().is_event_triggered() {
+            //A button press
+            gpiote.channel0().reset_events();
+            if debounced {
+                RESOLUTION.store(BubbleResolution::Coarse as u8, Release);
+            }
+        } else if gpiote.channel1().is_event_triggered() {
+            //B button press
+            gpiote.channel1().reset_events();
+
+            if debounced {
+                RESOLUTION.store(BubbleResolution::Fine as u8, Release);
+            }
+        }
+    });
+}
+
 #[entry]
 fn main() -> ! {
     rtt_init_print!();
     let board = Board::take().unwrap();
     let mut display_timer = Timer::new(board.TIMER0);
     let mut display = Display::new(board.display_pins);
-    let mut a_btn = board.buttons.button_a;
-    let mut b_btn = board.buttons.button_b;
+    let a_btn = board.buttons.button_a.into_floating_input();
+    let b_btn = board.buttons.button_b.into_floating_input();
+
+    //setup GPIOTE for both button press interrupts
+    let gpiote = gpiote::Gpiote::new(board.GPIOTE);
+    let channel0 = gpiote.channel0();
+    let channel1 = gpiote.channel1();
+    channel0
+        .input_pin(&a_btn.degrade())
+        .hi_to_lo()
+        .enable_interrupt();
+    channel0.reset_events();
+    channel1
+        .input_pin(&b_btn.degrade())
+        .hi_to_lo()
+        .enable_interrupt();
+    channel1.reset_events();
+
+    GPIOTE_PERIPHERAL.init(gpiote);
+
+    //setup debounce timer
+    let mut debounce_timer = Timer::new(board.TIMER1);
+    debounce_timer.disable_interrupt();
+    debounce_timer.reset_event();
+    DEBOUNCE_TIMER.init(debounce_timer);
 
     let i2c = { twim::Twim::new(board.TWIM0, board.i2c_internal.into(), FREQUENCY_A::K100) };
     let mut sensor = Lsm303agr::new_with_i2c(i2c);
@@ -112,12 +201,12 @@ fn main() -> ! {
 
     let mut leds = LEDs::new();
 
+    // Set up the NVIC to handle interrupts.
+    unsafe { NVIC::unmask(Interrupt::GPIOTE) };
+    NVIC::unpend(Interrupt::GPIOTE);
+
     loop {
-        if a_btn.is_low().unwrap() {
-            leds.set_mode(BubbleResolution::Coarse);
-        } else if b_btn.is_low().unwrap() {
-            leds.set_mode(BubbleResolution::Fine);
-        }
+        leds.set_mode(BubbleResolution::try_from(RESOLUTION.load(Acquire)).unwrap());
 
         if sensor.accel_status().unwrap().xyz_new_data() {
             let (x, y, z) = sensor.acceleration().unwrap().xyz_mg();

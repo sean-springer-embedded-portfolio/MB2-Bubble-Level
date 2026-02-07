@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "critical-section-lock-mut",
  "embedded-hal 1.0.0",
  "lsm303agr",
  "microbit-v2",
@@ -104,6 +105,15 @@ name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
+name = "critical-section-lock-mut"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbb9762738c1ef9d31b7586c00c0158d20025a734f9f6905282c1fc5a2e182f0"
+dependencies = [
+ "critical-section",
+]
 
 [[package]]
 name = "crunchy"
